@@ -1,12 +1,13 @@
 """Point d'entrée de FOOTBALL INTELLIGENCE PRO.
 
-Phase 2 : squelette seulement. L'interface graphique arrive en Phase 3.
+Lancement : python main.py
 """
-from config import APP_NAME, APP_VERSION
+from interface.app import App
 
 
 def main() -> None:
-    print(f"{APP_NAME} v{APP_VERSION} : structure du projet prête (Phase 2).")
+    app = App()
+    app.mainloop()
 
 
 if __name__ == "__main__":
