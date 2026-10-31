@@ -182,3 +182,17 @@ def get_finished_matches(conn, team_id: int, limit: int | None = None,
         (*params, -1 if limit is None else limit),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def competition_goal_averages(conn, competition_id: int, season: int | None):
+    """(moyenne buts domicile, moyenne buts extérieur, nombre de matchs) pour une compétition et saison."""
+    row = conn.execute(
+        """SELECT AVG(home_goals), AVG(away_goals), COUNT(*) FROM matches
+           WHERE competition_id = ? AND season IS ? AND status = 'finished'
+             AND home_goals IS NOT NULL AND away_goals IS NOT NULL""",
+        (competition_id, season),
+    ).fetchone()
+    avg_home, avg_away, count = row[0], row[1], row[2]
+    if count == 0:
+        return None, None, 0
+    return round(avg_home, 3), round(avg_away, 3), count
