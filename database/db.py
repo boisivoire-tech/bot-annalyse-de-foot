@@ -131,3 +131,54 @@ def record_sync(conn, provider: str, endpoint: str, status: str, message: str | 
         "INSERT INTO sync_log (provider, endpoint, status, message, created_at) VALUES (?, ?, ?, ?, ?)",
         (provider, endpoint, status, message, utc_now()),
     )
+
+
+# ----- Lectures pour le moteur statistique ---------------------------------
+
+def get_local_team_id(conn, api_id: int) -> int | None:
+    row = conn.execute("SELECT id FROM teams WHERE api_id = ?", (api_id,)).fetchone()
+    return None if row is None else row[0]
+
+
+def upsert_standing(conn, competition_id: int, season: int, team_id: int, row: dict, source: str) -> None:
+    """Insère ou met à jour une ligne du classement."""
+    conn.execute(
+        """INSERT INTO standings (competition_id, season, team_id, rank, points, played, won, drawn, lost,
+                                  goals_for, goals_against, source, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(competition_id, season, team_id) DO UPDATE SET
+               rank = excluded.rank, points = excluded.points, played = excluded.played,
+               won = excluded.won, drawn = excluded.drawn, lost = excluded.lost,
+               goals_for = excluded.goals_for, goals_against = excluded.goals_against,
+               source = excluded.source, updated_at = excluded.updated_at""",
+        (competition_id, season, team_id, row["rank"], row["points"], row["played"], row["won"],
+         row["drawn"], row["lost"], row["goals_for"], row["goals_against"], source, utc_now()),
+    )
+
+
+def get_standings(conn, competition_id: int, season: int) -> list[dict]:
+    """Classement enregistré, du 1er au dernier."""
+    rows = conn.execute(
+        """SELECT s.*, t.name AS team_name FROM standings s JOIN teams t ON t.id = s.team_id
+           WHERE s.competition_id = ? AND s.season = ? ORDER BY s.rank""",
+        (competition_id, season),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_finished_matches(conn, team_id: int, limit: int | None = None,
+                         opponent_id: int | None = None) -> list[dict]:
+    """Matchs terminés d'une équipe (ou confrontations avec opponent_id), du plus récent au plus ancien."""
+    if opponent_id is None:
+        where = "(home_team_id = ? OR away_team_id = ?)"
+        params = [team_id, team_id]
+    else:
+        where = "((home_team_id = ? AND away_team_id = ?) OR (home_team_id = ? AND away_team_id = ?))"
+        params = [team_id, opponent_id, opponent_id, team_id]
+    rows = conn.execute(
+        f"""SELECT id, competition_id, kickoff_utc, home_team_id, away_team_id, home_goals, away_goals
+            FROM matches WHERE status = 'finished' AND {where}
+            ORDER BY kickoff_utc DESC LIMIT ?""",
+        (*params, -1 if limit is None else limit),
+    ).fetchall()
+    return [dict(r) for r in rows]

@@ -121,3 +121,64 @@ class FootballApiClient:
                 skipped += 1
         self.last_skipped = skipped
         return fixtures
+
+    def _fixtures_from(self, raw: list) -> list[dict]:
+        fixtures, skipped = [], 0
+        for item in raw:
+            try:
+                fixtures.append(normalize_fixture(item))
+            except ValueError:
+                skipped += 1
+        self.last_skipped = skipped
+        return fixtures
+
+    def team_last_fixtures(self, team_api_id: int, last: int = 15) -> list[dict]:
+        """Les `last` derniers matchs d'une équipe (maximum 20 côté API)."""
+        return self._fixtures_from(self._get("fixtures", {"team": team_api_id, "last": min(last, 20)}))
+
+    def head_to_head_fixtures(self, team_a: int, team_b: int, last: int = 10) -> list[dict]:
+        """Confrontations directes entre deux équipes."""
+        return self._fixtures_from(self._get("fixtures/headtohead",
+                                             {"h2h": f"{team_a}-{team_b}", "last": min(last, 20)}))
+
+    def standings(self, league_id: int, season: int) -> dict:
+        """Classement d'un championnat. Retourne {'league': {...}, 'rows': [...]}."""
+        return normalize_standings(self._get("standings", {"league": league_id, "season": season}))
+
+
+def normalize_standings(payload: list) -> dict:
+    """Simplifie la réponse du classement. Les lignes invalides sont ignorées."""
+    if not payload:
+        return {"league": None, "rows": []}
+    try:
+        league = payload[0]["league"]
+        groups = league.get("standings") or []
+        raw_rows = groups[0] if groups else []
+    except (KeyError, TypeError, IndexError) as exc:
+        raise ApiError(f"Classement illisible : {exc}") from exc
+
+    rows = []
+    for r in raw_rows:
+        try:
+            rows.append({
+                "rank": int(r["rank"]),
+                "team": {"api_id": int(r["team"]["id"]), "name": str(r["team"]["name"])},
+                "points": int(r["points"]),
+                "played": int(r["all"]["played"]),
+                "won": int(r["all"]["win"]),
+                "drawn": int(r["all"]["draw"]),
+                "lost": int(r["all"]["lose"]),
+                "goals_for": int(r["all"]["goals"]["for"]),
+                "goals_against": int(r["all"]["goals"]["against"]),
+            })
+        except (KeyError, TypeError, ValueError):
+            continue
+    return {
+        "league": {
+            "api_id": int(league["id"]),
+            "name": str(league["name"]),
+            "country": league.get("country"),
+            "season": int(league["season"]),
+        },
+        "rows": rows,
+    }

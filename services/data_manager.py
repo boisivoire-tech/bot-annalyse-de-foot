@@ -1,6 +1,7 @@
 """Gestionnaire de données : relie l'API, le cache et la base SQLite.
 
-Ordre de lecture : cache valide -> API (si besoin) -> base locale hors connexion.
+Ordre de lecture : cache valide -> API (si besoin) -> dernières données locales si Internet manque.
+Toutes les écritures sont faites dans une seule transaction, sans doublons.
 """
 from dataclasses import dataclass
 from datetime import date
@@ -25,31 +26,69 @@ class DataManager:
         self.client = client
         self.ttl_seconds = ttl_seconds
 
-    def sync_fixtures_for_date(self, day: date, force: bool = False) -> SyncResult:
-        key = f"fixtures:{day.isoformat()}"
-        fixtures = None if force else cache.get(self.conn, key)
-        result = SyncResult(from_cache=fixtures is not None)
-
-        if fixtures is None:
-            try:
-                fixtures = self.client.fixtures_by_date(day)
-            except ApiError as exc:
-                db.record_sync(self.conn, PROVIDER, f"fixtures:{day}", "error", str(exc))
-                result.error = str(exc)
-                fixtures = cache.get(self.conn, key, allow_expired=True)
-                if fixtures is None:
-                    return result          # rien à afficher
-                result.offline = True
+    # ----- Chargement avec cache ------------------------------------------
+    def _load(self, key: str, endpoint: str, fetch, force: bool = False):
+        """Retourne (données, résultat). Essaie le cache, puis l'API, puis les données expirées."""
+        result = SyncResult()
+        if not force:
+            data = cache.get(self.conn, key)
+            if data is not None:
                 result.from_cache = True
-            else:
-                cache.set(self.conn, key, fixtures, PROVIDER, self.ttl_seconds)
-                db.record_sync(self.conn, PROVIDER, f"fixtures:{day}", "ok")
+                return data, result
+        try:
+            data = fetch()
+        except ApiError as exc:
+            db.record_sync(self.conn, PROVIDER, endpoint, "error", str(exc))
+            result.error = str(exc)
+            data = cache.get(self.conn, key, allow_expired=True)
+            if data is None:
+                return None, result
+            result.offline = True
+            result.from_cache = True
+            return data, result
+        cache.set(self.conn, key, data, PROVIDER, self.ttl_seconds)
+        db.record_sync(self.conn, PROVIDER, endpoint, "ok")
+        return data, result
 
-        result.count = self._store_fixtures(fixtures)
+    # ----- Synchronisations -------------------------------------------------
+    def sync_fixtures_for_date(self, day: date, force: bool = False) -> SyncResult:
+        fixtures, result = self._load(
+            f"fixtures:{day.isoformat()}", f"fixtures:{day}",
+            lambda: self.client.fixtures_by_date(day), force)
+        if fixtures is not None:
+            result.count = self._store_fixtures(fixtures)
         return result
 
+    def sync_team_history(self, team_api_id: int, last: int = 15, force: bool = False) -> SyncResult:
+        """Récupère et enregistre les derniers matchs d'une équipe."""
+        fixtures, result = self._load(
+            f"team_last:{team_api_id}:{last}", f"team:{team_api_id}:last{last}",
+            lambda: self.client.team_last_fixtures(team_api_id, last), force)
+        if fixtures is not None:
+            result.count = self._store_fixtures(fixtures)
+        return result
+
+    def sync_head_to_head(self, team_a: int, team_b: int, last: int = 10, force: bool = False) -> SyncResult:
+        """Récupère et enregistre les confrontations directes."""
+        fixtures, result = self._load(
+            f"h2h:{team_a}-{team_b}:{last}", f"h2h:{team_a}-{team_b}",
+            lambda: self.client.head_to_head_fixtures(team_a, team_b, last), force)
+        if fixtures is not None:
+            result.count = self._store_fixtures(fixtures)
+        return result
+
+    def sync_standings(self, league_id: int, season: int, force: bool = False) -> SyncResult:
+        """Récupère et enregistre le classement d'un championnat."""
+        data, result = self._load(
+            f"standings:{league_id}:{season}", f"standings:{league_id}:{season}",
+            lambda: self.client.standings(league_id, season), force)
+        if data is not None and data.get("league"):
+            result.count = self._store_standings(data)
+        return result
+
+    # ----- Écritures -------------------------------------------------------
     def _store_fixtures(self, fixtures: list[dict]) -> int:
-        """Enregistre les matchs sans doublons. Une seule transaction pour aller plus vite."""
+        stored = 0
         with self.conn:
             for fx in fixtures:
                 league = fx["league"]
@@ -62,4 +101,17 @@ class DataManager:
                 db.upsert_match(self.conn, fx["api_id"], comp_id, league["season"], fx["round"],
                                 fx["kickoff_utc"], fx["status"], home_id, away_id,
                                 fx["home_goals"], fx["away_goals"], PROVIDER)
-        return len(fixtures)
+                stored += 1
+        return stored
+
+    def _store_standings(self, data: dict) -> int:
+        league = data["league"]
+        stored = 0
+        with self.conn:
+            comp_id = db.upsert_competition(self.conn, league["api_id"], league["name"],
+                                            league["country"], league["season"], "league", PROVIDER)
+            for row in data["rows"]:
+                team_id = db.upsert_team(self.conn, row["team"]["api_id"], row["team"]["name"], None, PROVIDER)
+                db.upsert_standing(self.conn, comp_id, league["season"], team_id, row, PROVIDER)
+                stored += 1
+        return stored
