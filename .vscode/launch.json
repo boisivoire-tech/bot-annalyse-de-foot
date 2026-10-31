@@ -8,7 +8,6 @@
             "program": "${workspaceFolder}/main.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
-            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
             "justMyCode": true
         },
         {
@@ -19,7 +18,6 @@
             "args": ["discover", "-s", "tests", "-t", ".", "-v"],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
-            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
             "justMyCode": true
         }
     ]
