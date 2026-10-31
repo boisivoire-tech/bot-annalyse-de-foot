@@ -3,11 +3,12 @@
 Ordre de lecture : cache valide -> API (si besoin) -> dernières données locales si Internet manque.
 Toutes les écritures sont faites dans une seule transaction, sans doublons.
 """
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 
 from config import CACHE_TTL_HOURS
 from database import db
+from engine import evaluation
 from services import cache
 from services.football_api import PROVIDER, ApiError, FootballApiClient
 
@@ -40,10 +41,10 @@ class DataManager:
         except ApiError as exc:
             db.record_sync(self.conn, PROVIDER, endpoint, "error", str(exc))
             result.error = str(exc)
+            result.offline = exc.network
             data = cache.get(self.conn, key, allow_expired=True)
             if data is None:
                 return None, result
-            result.offline = True
             result.from_cache = True
             return data, result
         cache.set(self.conn, key, data, PROVIDER, self.ttl_seconds)
@@ -115,3 +116,91 @@ class DataManager:
                 db.upsert_standing(self.conn, comp_id, league["season"], team_id, row, PROVIDER)
                 stored += 1
         return stored
+
+
+# ----- Actualisation complète (bouton ACTUALISER) ---------------------------
+MAX_REQUESTS_PER_REFRESH = 40   # protège le quota gratuit (100 requêtes/jour)
+MAX_TEAMS_PER_REFRESH = 20
+MAX_STANDINGS_PER_REFRESH = 6
+
+
+@dataclass
+class RefreshReport:
+    requests_used: int = 0
+    matches_stored: int = 0
+    analyses_locked: int = 0
+    analyses_evaluated: int = 0
+    offline: bool = False
+    errors: list[str] = field(default_factory=list)
+    messages: list[str] = field(default_factory=list)
+
+
+def refresh_all(conn, client: FootballApiClient, now: datetime | None = None,
+                ttl_seconds: int = CACHE_TTL_HOURS * 3600) -> RefreshReport:
+    """Met à jour matchs, historiques, classements et résultats, dans la limite du quota.
+
+    Nécessite Internet pour les nouvelles données. Sans connexion, seules les données locales sont utilisées.
+    """
+    now = now or datetime.now(timezone.utc)
+    manager = DataManager(conn, client, ttl_seconds)
+    report = RefreshReport()
+
+    def budget_left() -> bool:
+        return client.calls < MAX_REQUESTS_PER_REFRESH
+
+    # 1. Matchs : hier (résultats), aujourd'hui et demain. Données récentes : on force la mise à jour.
+    for offset in (-1, 0, 1):
+        if not budget_left() or report.offline:
+            break
+        day = (now + timedelta(days=offset)).date()
+        result = manager.sync_fixtures_for_date(day, force=True)
+        report.matches_stored += result.count
+        if result.error:
+            report.errors.append(result.error)
+        if result.offline:
+            report.offline = True
+
+    if report.offline:
+        report.messages.append("Connexion impossible : seules les données enregistrées sont affichées.")
+    else:
+        # 2. Historique des équipes qui jouent bientôt (cache respecté)
+        upcoming_until = (now + timedelta(days=3)).isoformat()
+        teams = conn.execute(
+            """SELECT DISTINCT t.api_id FROM matches m
+               JOIN teams t ON t.id IN (m.home_team_id, m.away_team_id)
+               WHERE m.status = 'scheduled' AND m.kickoff_utc BETWEEN ? AND ?
+               ORDER BY t.api_id LIMIT ?""",
+            (now.isoformat(), upcoming_until, MAX_TEAMS_PER_REFRESH)).fetchall()
+        for row in teams:
+            if not budget_left():
+                report.messages.append("Limite de requêtes atteinte pour cette actualisation.")
+                break
+            res = manager.sync_team_history(row[0], last=15)
+            report.matches_stored += res.count
+            if res.error:
+                report.errors.append(res.error)
+                if res.offline:
+                    report.offline = True
+                    break
+
+        # 3. Classements des championnats concernés
+        if not report.offline:
+            comps = conn.execute(
+                """SELECT DISTINCT c.api_id, c.season FROM matches m
+                   JOIN competitions c ON c.id = m.competition_id
+                   WHERE m.status = 'scheduled' AND m.kickoff_utc BETWEEN ? AND ?
+                     AND c.kind = 'league' AND c.season IS NOT NULL
+                   LIMIT ?""",
+                (now.isoformat(), upcoming_until, MAX_STANDINGS_PER_REFRESH)).fetchall()
+            for row in comps:
+                if not budget_left():
+                    break
+                res = manager.sync_standings(row[0], row[1])
+                if res.error:
+                    report.errors.append(res.error)
+
+    # 4. Verrouillage des analyses dont le match a commencé, puis évaluation des matchs terminés
+    report.analyses_locked = evaluation.lock_started_matches(conn, now.isoformat())
+    report.analyses_evaluated = evaluation.evaluate_finished(conn)
+    report.requests_used = client.calls
+    return report

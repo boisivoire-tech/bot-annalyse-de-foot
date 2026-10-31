@@ -9,7 +9,7 @@ Conventions :
 from dataclasses import dataclass
 from datetime import datetime
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS competitions (
@@ -136,6 +136,17 @@ CREATE TABLE IF NOT EXISTS evaluations (
     log_loss          REAL    NOT NULL,
     correct_1x2       INTEGER NOT NULL CHECK (correct_1x2 IN (0, 1)),
     evaluated_at      TEXT    NOT NULL
+);
+
+-- Évaluation marché par marché (plus/moins de buts, les deux équipes marquent)
+CREATE TABLE IF NOT EXISTS evaluation_markets (
+    analysis_id     INTEGER NOT NULL REFERENCES analyses(id),
+    market          TEXT    NOT NULL,
+    predicted_prob  REAL    NOT NULL CHECK (predicted_prob BETWEEN 0 AND 1),
+    actual          INTEGER NOT NULL CHECK (actual IN (0, 1)),
+    brier           REAL    NOT NULL,
+    log_loss        REAL    NOT NULL,
+    PRIMARY KEY (analysis_id, market)
 );
 
 -- Cache des réponses API (évite les appels inutiles, sert en mode hors ligne)

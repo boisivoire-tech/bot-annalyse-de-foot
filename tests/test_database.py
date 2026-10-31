@@ -79,7 +79,8 @@ class DatabaseTests(unittest.TestCase):
     def test_init_is_idempotent(self):
         db.init_db(self.conn)
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(version, 1)
+        from database.models import SCHEMA_VERSION
+        self.assertEqual(version, SCHEMA_VERSION)
 
 
 if __name__ == "__main__":

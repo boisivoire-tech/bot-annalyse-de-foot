@@ -211,13 +211,9 @@ def predict_match(home_matches: list[dict], away_matches: list[dict], home_id: i
     )
 
 
-def predict_for_match(conn, match_id: int) -> tuple[int, PredictionResult]:
-    """Charge un match depuis la base, calcule la prédiction, l'enregistre et retourne (id analyse, résultat).
-
-    Seuls les matchs joués AVANT le coup d'envoi servent de données (aucune fuite du résultat).
-    """
-    match = conn.execute(
-        "SELECT * FROM matches WHERE id = ?", (match_id,)).fetchone()
+def load_match_inputs(conn, match_id: int) -> dict:
+    """Charge un match et l'historique utilisable : uniquement les matchs joués AVANT le coup d'envoi."""
+    match = conn.execute("SELECT * FROM matches WHERE id = ?", (match_id,)).fetchone()
     if match is None:
         raise ValueError(f"Match introuvable : {match_id}")
     kickoff = match["kickoff_utc"]
@@ -226,15 +222,30 @@ def predict_for_match(conn, match_id: int) -> tuple[int, PredictionResult]:
     def before(matches):
         return [m for m in matches if m["kickoff_utc"] < kickoff]
 
-    home_matches = before(db.get_finished_matches(conn, home_id))
-    away_matches = before(db.get_finished_matches(conn, away_id))
-    h2h = before(db.get_finished_matches(conn, home_id, opponent_id=away_id))
-
     avg_home, avg_away, count = db.competition_goal_averages(conn, match["competition_id"], match["season"])
-    baseline = league_baseline(avg_home, avg_away, count)
+    return {
+        "match": dict(match),
+        "home_id": home_id,
+        "away_id": away_id,
+        "home_matches": before(db.get_finished_matches(conn, home_id)),
+        "away_matches": before(db.get_finished_matches(conn, away_id)),
+        "h2h": before(db.get_finished_matches(conn, home_id, opponent_id=away_id)),
+        "baseline": league_baseline(avg_home, avg_away, count),
+    }
 
-    result = predict_match(home_matches, away_matches, home_id, away_id, baseline, h2h)
 
+def compute_for_match(conn, match_id: int) -> PredictionResult:
+    """Calcule la prédiction sans l'enregistrer."""
+    d = load_match_inputs(conn, match_id)
+    return predict_match(d["home_matches"], d["away_matches"], d["home_id"], d["away_id"],
+                         d["baseline"], d["h2h"])
+
+
+def predict_for_match(conn, match_id: int, save: bool = True) -> tuple[int | None, PredictionResult]:
+    """Calcule la prédiction et l'enregistre (si save=True). Retourne (id analyse ou None, résultat)."""
+    result = compute_for_match(conn, match_id)
+    if not save:
+        return None, result
     values = {
         "lambda_home": result.lambda_home, "lambda_away": result.lambda_away,
         "p_home": result.p_home, "p_draw": result.p_draw, "p_away": result.p_away,
@@ -245,7 +256,7 @@ def predict_for_match(conn, match_id: int) -> tuple[int, PredictionResult]:
         "data_quality": result.data_quality,
         "model_confidence": result.model_confidence,
         "inputs_json": json.dumps({"factors": result.factors, "inputs": result.inputs},
-                                                ensure_ascii=False),
+                                  ensure_ascii=False),
     }
     with conn:
         analysis_id = db.save_analysis(conn, match_id, MODEL_VERSION, values)

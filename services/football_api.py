@@ -24,7 +24,14 @@ STATUS_MAP = {
 
 
 class ApiError(Exception):
-    """Erreur lisible par l'utilisateur (connexion, clé, quota, réponse invalide)."""
+    """Erreur lisible par l'utilisateur (connexion, clé, quota, réponse invalide).
+
+    network=True signifie que la connexion Internet a échoué (mode hors ligne).
+    """
+
+    def __init__(self, message: str, network: bool = False):
+        super().__init__(message)
+        self.network = network
 
 
 def _to_int_or_none(value):
@@ -70,17 +77,19 @@ class FootballApiClient:
         self.timeout = timeout
         self.requests_remaining: str | None = None
         self.last_skipped = 0
+        self.calls = 0   # nombre de requêtes envoyées pendant cette session
 
     def _get(self, endpoint: str, params: dict) -> list:
         if not self.api_key:
             raise ApiError("Clé API absente : renseignez API_FOOTBALL_KEY dans le fichier .env.")
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        self.calls += 1
         try:
             response = self.session.get(url, params=params,
                                         headers={"x-apisports-key": self.api_key},
                                         timeout=self.timeout)
         except requests.RequestException as exc:
-            raise ApiError("Connexion impossible à l'API. Vérifiez votre Internet.") from exc
+            raise ApiError("Connexion impossible à l'API. Vérifiez votre Internet.", network=True) from exc
 
         if response.status_code == 429:
             raise ApiError("Limite de requêtes atteinte. Réessayez plus tard.")
