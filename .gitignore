@@ -1,0 +1,23 @@
+# Environnement virtuel et cache Python
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets : ne jamais publier
+.env
+
+# Données locales (base SQLite, cache)
+data/*
+!data/.gitkeep
+*.db
+*.sqlite3
+
+# Fabrication de l'exécutable
+build/
+dist/
+*.spec
+
+# Divers
+.vscode/
+.idea/
+Thumbs.db
